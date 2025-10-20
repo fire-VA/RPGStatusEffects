@@ -18,7 +18,7 @@ namespace RPGStatusEffects
         private readonly Harmony harmony = new Harmony(PluginGUID);
         public const string PluginGUID = "com.Fire.rpgstatuseffects";
         public const string PluginName = "RPGStatusEffects";
-        public const string PluginVersion = "1.0.0";
+        public const string PluginVersion = "1.0.1"; // Updated to 1.0.1
 
         public ConfigSync configSync;
         public SyncedConfigEntry<bool> configVerboseLogging;
@@ -27,7 +27,7 @@ namespace RPGStatusEffects
         public SyncedConfigEntry<string> configTauntHammerRecipe;
         private bool isInitialized;
         private bool isShuttingDown;
-        private static AssetBundle assetBundle;
+        public static AssetBundle assetBundle; // Changed to public
         private Dictionary<string, Piece.Requirement[]> itemRecipeCache = new Dictionary<string, Piece.Requirement[]>();
         private FieldInfo knownRecipesField;
         private static readonly Dictionary<Character, float> lastTauntLogTimes = new Dictionary<Character, float>();

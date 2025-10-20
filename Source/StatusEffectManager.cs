@@ -20,7 +20,7 @@ namespace RPGStatusEffects
             ObjectDB objectDB = ObjectDB.instance;
             RegisterPurityEffect(objectDB);
             RegisterTauntEffect(objectDB);
-            RegisterTauntingEffect(objectDB); // New: Register player taunting effect
+            RegisterTauntingEffect(objectDB);
             if (RPGStatusEffects.Instance.configVerboseLogging.Value)
                 Debug.Log($"{RPGStatusEffects.PluginName}: StatusEffectManager initialized {CustomEffects.Count} custom effects.");
         }
@@ -28,7 +28,14 @@ namespace RPGStatusEffects
         private static void RegisterPurityEffect(ObjectDB objectDB)
         {
             const string effectName = "Purify";
-            if (objectDB.m_StatusEffects.Any(se => se.name == effectName)) return;
+            // Remove existing effect to ensure duration updates
+            var existingEffect = objectDB.m_StatusEffects.FirstOrDefault(se => se.name == effectName);
+            if (existingEffect != null)
+            {
+                objectDB.m_StatusEffects.Remove(existingEffect);
+                if (RPGStatusEffects.Instance.configVerboseLogging.Value)
+                    Debug.Log($"{RPGStatusEffects.PluginName}: Removed existing Purify effect to update duration.");
+            }
             PurityEffect purityEffect = ScriptableObject.CreateInstance<PurityEffect>();
             purityEffect.name = effectName;
             purityEffect.Icon = LoadOrCreateIcon();
@@ -53,7 +60,7 @@ namespace RPGStatusEffects
             TauntEffect tauntEffect = ScriptableObject.CreateInstance<TauntEffect>();
             tauntEffect.name = effectName;
             tauntEffect.Duration = RPGStatusEffects.Instance.configTauntDuration.Value;
-            tauntEffect.Icon = LoadTauntIcon();
+            tauntEffect.Icon = null; // No icon for enemy-side Taunted effect (not shown on HUD)
             objectDB.m_StatusEffects.Add(tauntEffect);
             CustomEffects[effectName] = tauntEffect;
             if (RPGStatusEffects.Instance.configVerboseLogging.Value)
@@ -81,43 +88,95 @@ namespace RPGStatusEffects
                 Debug.Log($"{RPGStatusEffects.PluginName}: Registered TauntingEffect with duration {tauntingEffect.Duration}s, Icon: {(tauntingEffect.Icon != null ? "Assigned" : "Null")}.");
         }
 
-        private static Sprite LoadOrCreateIcon()
+        private static Sprite LoadOrCreateIcon() // For Purity
         {
-            Texture2D fallbackTexture = new Texture2D(64, 64);
-            Color[] pixels = new Color[64 * 64];
-            for (int i = 0; i < pixels.Length; i++)
+            string[] possiblePaths = new[]
             {
-                pixels[i] = Color.cyan;
+                "assets/custom/vaitems/icons/purity_icon",
+                "Assets/Custom/VAItems/Icons/purity_icon",
+                "assets/custom/VAitems/icons/purity_icon",
+                "Assets/Custom/VAItems/Icons/Purity_Icon",
+                "assets/custom/vaitems/icons/purity_icon.png"
+            };
+            Sprite puritySprite = null;
+            foreach (var path in possiblePaths)
+            {
+                puritySprite = RPGStatusEffects.assetBundle?.LoadAsset<Sprite>(path);
+                if (puritySprite != null)
+                {
+                    if (RPGStatusEffects.Instance.configVerboseLogging.Value)
+                        Debug.Log($"{RPGStatusEffects.PluginName}: Loaded purity_icon from asset bundle at {path}.");
+                    break;
+                }
             }
-            fallbackTexture.SetPixels(pixels);
-            fallbackTexture.Apply();
-            return Sprite.Create(fallbackTexture, new Rect(0, 0, 64, 64), new Vector2(0.5f, 0.5f));
+            if (puritySprite == null)
+            {
+                if (RPGStatusEffects.Instance.configVerboseLogging.Value)
+                {
+                    Debug.LogWarning($"{RPGStatusEffects.PluginName}: Failed to load purity_icon from asset bundle. Attempted paths: {string.Join(", ", possiblePaths)}.");
+                    if (RPGStatusEffects.assetBundle != null)
+                        Debug.Log($"{RPGStatusEffects.PluginName}: Available assets in bundle: {string.Join(", ", RPGStatusEffects.assetBundle.GetAllAssetNames())}.");
+                    Debug.Log($"{RPGStatusEffects.PluginName}: Falling back to cyan square for Purity icon.");
+                }
+                Texture2D fallbackTexture = new Texture2D(64, 64);
+                Color[] pixels = new Color[64 * 64];
+                for (int i = 0; i < pixels.Length; i++)
+                {
+                    pixels[i] = Color.cyan;
+                }
+                fallbackTexture.SetPixels(pixels);
+                fallbackTexture.Apply();
+                puritySprite = Sprite.Create(fallbackTexture, new Rect(0, 0, 64, 64), new Vector2(0.5f, 0.5f));
+            }
+            return puritySprite;
         }
 
-        private static Sprite LoadTauntIcon()
+        private static Sprite LoadTauntIcon() // For Taunted (enemy, not shown)
         {
-            Texture2D fallbackTexture = new Texture2D(64, 64);
-            Color[] pixels = new Color[64 * 64];
-            for (int i = 0; i < pixels.Length; i++)
-            {
-                pixels[i] = Color.red;
-            }
-            fallbackTexture.SetPixels(pixels);
-            fallbackTexture.Apply();
-            return Sprite.Create(fallbackTexture, new Rect(0, 0, 64, 64), new Vector2(0.5f, 0.5f));
+            return null; // No icon for enemy-side Taunted effect
         }
 
-        private static Sprite LoadTauntingIcon()
+        private static Sprite LoadTauntingIcon() // For Taunting (player)
         {
-            Texture2D fallbackTexture = new Texture2D(64, 64);
-            Color[] pixels = new Color[64 * 64];
-            for (int i = 0; i < pixels.Length; i++)
+            string[] possiblePaths = new[]
             {
-                pixels[i] = Color.yellow; // Yellow for player taunting theme
+                "assets/custom/vaitems/icons/taunt_icon",
+                "Assets/Custom/VAItems/Icons/taunt_icon",
+                "assets/custom/VAitems/icons/taunt_icon",
+                "Assets/Custom/VAItems/Icons/Taunt_Icon",
+                "assets/custom/vaitems/icons/taunt_icon.png"
+            };
+            Sprite tauntSprite = null;
+            foreach (var path in possiblePaths)
+            {
+                tauntSprite = RPGStatusEffects.assetBundle?.LoadAsset<Sprite>(path);
+                if (tauntSprite != null)
+                {
+                    if (RPGStatusEffects.Instance.configVerboseLogging.Value)
+                        Debug.Log($"{RPGStatusEffects.PluginName}: Loaded taunt_icon from asset bundle at {path}.");
+                    break;
+                }
             }
-            fallbackTexture.SetPixels(pixels);
-            fallbackTexture.Apply();
-            return Sprite.Create(fallbackTexture, new Rect(0, 0, 64, 64), new Vector2(0.5f, 0.5f));
+            if (tauntSprite == null)
+            {
+                if (RPGStatusEffects.Instance.configVerboseLogging.Value)
+                {
+                    Debug.LogWarning($"{RPGStatusEffects.PluginName}: Failed to load taunt_icon from asset bundle. Attempted paths: {string.Join(", ", possiblePaths)}.");
+                    if (RPGStatusEffects.assetBundle != null)
+                        Debug.Log($"{RPGStatusEffects.PluginName}: Available assets in bundle: {string.Join(", ", RPGStatusEffects.assetBundle.GetAllAssetNames())}.");
+                    Debug.Log($"{RPGStatusEffects.PluginName}: Falling back to yellow square for Taunting icon.");
+                }
+                Texture2D fallbackTexture = new Texture2D(64, 64);
+                Color[] pixels = new Color[64 * 64];
+                for (int i = 0; i < pixels.Length; i++)
+                {
+                    pixels[i] = Color.yellow;
+                }
+                fallbackTexture.SetPixels(pixels);
+                fallbackTexture.Apply();
+                tauntSprite = Sprite.Create(fallbackTexture, new Rect(0, 0, 64, 64), new Vector2(0.5f, 0.5f));
+            }
+            return tauntSprite;
         }
 
         public static StatusEffect GetEffect(string name)
