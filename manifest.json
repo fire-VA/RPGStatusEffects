@@ -1,6 +1,6 @@
 {
     "name": "RPGStatusEffects",
-    "version_number": "1.0.0",
+    "version_number": "1.0.2",
     "website_url": "https://github.com/fire-VA/RPGStatusEffects",
     "description": "Adds custom status effects to Valheim, including a Taunt effect with a craftable Taunt Hammer that forces enemies to attack the player for a configurable duration, and a Purity effect.",
     "dependencies": [
