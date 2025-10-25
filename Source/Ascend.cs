@@ -18,8 +18,7 @@ namespace RPGStatusEffects
         private readonly Harmony harmony = new Harmony(PluginGUID);
         public const string PluginGUID = "com.Fire.rpgstatuseffects";
         public const string PluginName = "RPGStatusEffects";
-        public const string PluginVersion = "1.0.1"; // Updated to 1.0.1
-
+        public const string PluginVersion = "1.0.1";
         public ConfigSync configSync;
         public SyncedConfigEntry<bool> configVerboseLogging;
         public SyncedConfigEntry<float> configPurityDuration;
@@ -27,38 +26,34 @@ namespace RPGStatusEffects
         public SyncedConfigEntry<string> configTauntHammerRecipe;
         private bool isInitialized;
         private bool isShuttingDown;
-        public static AssetBundle assetBundle; // Changed to public
-        private Dictionary<string, Piece.Requirement[]> itemRecipeCache = new Dictionary<string, Piece.Requirement[]>();
-        private FieldInfo knownRecipesField;
+        public static AssetBundle assetBundle;
+        public static readonly List<GameObject> itemPrefabs = new();
+        public static readonly FieldInfo knownRecipesField = typeof(Player).GetField("m_knownRecipes", BindingFlags.NonPublic | BindingFlags.Instance);
         private static readonly Dictionary<Character, float> lastTauntLogTimes = new Dictionary<Character, float>();
         private static readonly Dictionary<Character, (bool fleeIfHurt, bool fleeIfLowHealth, bool enableHuntPlayer)> originalHuntStates = new Dictionary<Character, (bool, bool, bool)>();
 
         private void Awake()
         {
             Instance = this;
-            knownRecipesField = typeof(Player).GetField("m_knownRecipes", BindingFlags.NonPublic | BindingFlags.Instance);
             configSync = new ConfigSync(PluginGUID) { DisplayName = PluginName, CurrentVersion = PluginVersion, MinimumRequiredVersion = PluginVersion };
             configSync.lockedConfigChanged += () =>
             {
                 if (isShuttingDown || !isInitialized || !IsObjectDBValid()) return;
                 ValidateConfigs();
                 SetupStatusEffects();
-                AddTauntHammer();
+                RecipeManager.SetupRecipe();
                 if (configVerboseLogging.Value)
-                    Debug.Log($"{PluginName}: Config sync triggered status effect and item update.");
+                    Debug.Log($"{PluginName}: Config sync triggered status effect and recipe update.");
             };
-
             configVerboseLogging = configSync.AddConfigEntry(Config.Bind("General", "VerboseLogging", false, "Enable detailed debug logs."));
             configPurityDuration = configSync.AddConfigEntry(Config.Bind("StatusEffects", "PurityDuration", 10f, "Duration of the Purity status effect in seconds."));
             configTauntDuration = configSync.AddConfigEntry(Config.Bind("StatusEffects", "TauntDuration", 15f, "Duration of the Taunt effect in seconds."));
             configTauntHammerRecipe = configSync.AddConfigEntry(Config.Bind("Item_Recipe_TauntHammer", "Recipe", "Wood,10,5,LeatherScraps,5,2,SwordCheat,1,0", "Recipe for TauntHammer_vad (format: ItemName,Amount,AmountPerLevel,...)"));
-
             ValidateConfigs();
             loadAssets();
             harmony.PatchAll();
             RegisterConsoleCommands();
             StartCoroutine(InitializeStatusEffects());
-
             if (configVerboseLogging.Value)
                 Debug.Log($"{PluginName}: Initialized version {PluginVersion}.");
         }
@@ -67,21 +62,18 @@ namespace RPGStatusEffects
         {
             try
             {
-                // Log all embedded resources for debugging
-                var execAssembly = Assembly.GetExecutingAssembly();
-                var resourceNames = execAssembly.GetManifestResourceNames();
-                if (configVerboseLogging.Value)
-                    Debug.Log($"{PluginName}: Embedded resources: {string.Join(", ", resourceNames)}");
-
                 assetBundle = GetAssetBundleFromResources("verdantsascent");
                 if (assetBundle == null)
                 {
                     Debug.LogError($"{PluginName}: Failed to load asset bundle!");
                     return;
                 }
-                var assetNames = assetBundle.GetAllAssetNames();
                 if (configVerboseLogging.Value)
+                {
+                    var assetNames = assetBundle.GetAllAssetNames();
                     Debug.Log($"{PluginName}: Available assets in bundle: {string.Join(", ", assetNames)}");
+                }
+                LoadItems("Assets/Custom/VAitems/");
             }
             catch (Exception ex)
             {
@@ -111,19 +103,121 @@ namespace RPGStatusEffects
             }
         }
 
+        private void LoadItems(string mainPath)
+        {
+            string[] itemNames = { "TauntHammer_vad" };
+            itemPrefabs.Clear();
+            foreach (string name in itemNames)
+            {
+                string prefabPath = mainPath + "items/" + name + ".prefab";
+                GameObject itemPrefab = assetBundle?.LoadAsset<GameObject>(prefabPath);
+                if (itemPrefab == null)
+                {
+                    if (configVerboseLogging.Value)
+                        Debug.LogWarning($"{PluginName}: Could not find prefab: {prefabPath}");
+                    continue;
+                }
+                var itemDrop = itemPrefab.GetComponent<ItemDrop>();
+                if (itemDrop == null)
+                {
+                    if (configVerboseLogging.Value)
+                        Debug.LogError($"{PluginName}: {name} - ItemDrop component missing!");
+                    continue;
+                }
+                itemPrefab.SetActive(true);
+                itemPrefabs.Add(itemPrefab);
+                if (configVerboseLogging.Value)
+                    Debug.Log($"{PluginName}: Loaded prefab: {name}, m_dropPrefab: {(itemDrop.m_itemData.m_dropPrefab != null ? itemDrop.m_itemData.m_dropPrefab.name : "null")}");
+            }
+        }
+
+        public static void AddItems(List<GameObject> items)
+        {
+            try
+            {
+                foreach (GameObject item in items)
+                {
+                    if (item == null)
+                    {
+                        if (Instance.configVerboseLogging.Value)
+                            Debug.LogWarning($"{PluginName}: Null item in list, skipping.");
+                        continue;
+                    }
+                    var itemDrop = item.GetComponent<ItemDrop>();
+                    if (itemDrop != null)
+                    {
+                        if (ObjectDB.instance.GetItemPrefab(item.name) == null)
+                        {
+                            ObjectDB.instance.m_items.Add(item);
+                            Dictionary<int, GameObject> m_itemsByHash = (Dictionary<int, GameObject>)typeof(ObjectDB).GetField("m_itemByHash", BindingFlags.NonPublic | BindingFlags.Instance).GetValue(ObjectDB.instance);
+                            m_itemsByHash[item.name.GetHashCode()] = item;
+                            if (Instance.configVerboseLogging.Value)
+                                Debug.Log($"{PluginName}: Added {item.name} to ObjectDB.m_items");
+                        }
+                        else if (Instance.configVerboseLogging.Value)
+                        {
+                            Debug.LogWarning($"{PluginName}: {item.name} already exists in ObjectDB, skipping.");
+                        }
+                    }
+                    else if (Instance.configVerboseLogging.Value)
+                    {
+                        Debug.LogError($"{PluginName}: {item.name} - ItemDrop not found on prefab");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"{PluginName}: Error adding items to ObjectDB: {ex.Message}");
+            }
+        }
+
+        public static void AddPrefabsToZNetScene(ZNetScene zNetScene)
+        {
+            try
+            {
+                foreach (GameObject gm in itemPrefabs)
+                {
+                    if (gm == null)
+                    {
+                        if (Instance.configVerboseLogging.Value)
+                            Debug.LogWarning($"{PluginName}: Null prefab in itemPrefabs list, skipping.");
+                        continue;
+                    }
+                    GameObject found = zNetScene.m_prefabs.Find((x) => x != null && x.name == gm.name);
+                    if (found == null)
+                    {
+                        zNetScene.m_prefabs.Add(gm);
+                        if (Instance.configVerboseLogging.Value)
+                            Debug.Log($"{PluginName}: Added {gm.name} to ZNetScene.m_prefabs");
+                    }
+                    else if (Instance.configVerboseLogging.Value)
+                    {
+                        Debug.LogWarning($"{PluginName}: Object exists in ZNetScene, skipping: {gm.name}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"{PluginName}: Error adding prefabs to ZNetScene: {ex.Message}");
+            }
+            zNetScene.m_prefabs.RemoveAll((x) => x == null);
+        }
+
         private void ValidateConfigs()
         {
             var recipeStrings = configTauntHammerRecipe.Value.Split(',').ToList();
             if (recipeStrings.Count % 3 != 0)
             {
-                Debug.LogWarning($"{PluginName}: Invalid recipe config for TauntHammer_vad - resetting to default.");
+                if (configVerboseLogging.Value)
+                    Debug.LogWarning($"{PluginName}: Invalid recipe config for TauntHammer_vad - resetting to default.");
                 configTauntHammerRecipe.Value = configTauntHammerRecipe.DefaultValue.ToString();
             }
             for (int i = 1; i < recipeStrings.Count; i += 3)
             {
                 if (!int.TryParse(recipeStrings[i], out _) || !int.TryParse(recipeStrings[i + 1], out _))
                 {
-                    Debug.LogWarning($"{PluginName}: Invalid amounts in recipe config for TauntHammer_vad - resetting to default.");
+                    if (configVerboseLogging.Value)
+                        Debug.LogWarning($"{PluginName}: Invalid amounts in recipe config for TauntHammer_vad - resetting to default.");
                     configTauntHammerRecipe.Value = configTauntHammerRecipe.DefaultValue.ToString();
                     break;
                 }
@@ -138,31 +232,29 @@ namespace RPGStatusEffects
                     Debug.Log($"{PluginName}: Main menu detected, skipping initialization.");
                 yield break;
             }
-
-            int maxAttempts = 200; // 20 seconds
+            int maxAttempts = 100; // 10 seconds
             int attempts = 0;
             float approximateTimeSpent = 0f;
-            const float maxTime = 20f;
-            while (!IsObjectDBValid())
+            const float maxTime = 10f;
+            while (!IsObjectDBValid() || ZNetScene.instance == null || ZNetScene.instance.m_prefabs == null || ZNetScene.instance.m_prefabs.Count == 0)
             {
                 if (configVerboseLogging.Value)
-                    Debug.Log($"{PluginName}: Waiting for ObjectDB (attempt {attempts + 1}/{maxAttempts})...");
+                    Debug.Log($"{PluginName}: Waiting for ObjectDB and ZNetScene (attempt {attempts + 1}/{maxAttempts})...");
                 attempts++;
                 if (approximateTimeSpent >= maxTime)
                 {
-                    Debug.LogError($"{PluginName}: ObjectDB failed to initialize after {maxAttempts} attempts.");
+                    Debug.LogError($"{PluginName}: ObjectDB and ZNetScene failed to initialize after {maxAttempts} attempts.");
                     yield break;
                 }
                 yield return new WaitForSeconds(0.1f);
                 approximateTimeSpent += 0.1f;
             }
-
             ValidateConfigs();
             SetupStatusEffects();
-            AddTauntHammer();
+            RecipeManager.SetupRecipe();
             isInitialized = true;
             if (configVerboseLogging.Value)
-                Debug.Log($"{PluginName}: Status effects and TauntHammer initialized.");
+                Debug.Log($"{PluginName}: Status effects and recipe initialized.");
         }
 
         public void SetupStatusEffects()
@@ -176,197 +268,25 @@ namespace RPGStatusEffects
             StatusEffectManager.Initialize();
         }
 
-        public void AddTauntHammer()
-        {
-            if (!IsObjectDBValid())
-            {
-                if (configVerboseLogging.Value)
-                    Debug.LogWarning($"{PluginName}: Skipping AddTauntHammer - ObjectDB not valid.");
-                return;
-            }
-
-            // Check if already added
-            if (ObjectDB.instance.GetItemPrefab("TauntHammer_vad") != null)
-            {
-                if (configVerboseLogging.Value)
-                    Debug.Log($"{PluginName}: TauntHammer_vad already exists in ObjectDB.");
-                return;
-            }
-
-            GameObject tauntHammer = null;
-            string usedPath = null;
-            if (assetBundle != null)
-            {
-                // Try multiple path variations
-                string[] possiblePaths = new[]
-                {
-                    "assets/custom/vaitems/items/taunthammer_vad.prefab",
-                    "Assets/Custom/VAitems/items/TauntHammer_vad.prefab",
-                    "assets/custom/VAItems/Items/taunthammer_vad.prefab",
-                    "Assets/Custom/VAItems/Items/TauntHammer_vad.prefab"
-                };
-                foreach (var path in possiblePaths)
-                {
-                    if (configVerboseLogging.Value)
-                        Debug.Log($"{PluginName}: Attempting to load prefab from {path}");
-                    tauntHammer = assetBundle.LoadAsset<GameObject>(path);
-                    if (tauntHammer != null)
-                    {
-                        usedPath = path;
-                        break;
-                    }
-                }
-            }
-
-            if (tauntHammer == null)
-            {
-                Debug.LogWarning($"{PluginName}: Failed to load TauntHammer_vad prefab. Attempted paths: {(assetBundle != null ? string.Join(", ", assetBundle.GetAllAssetNames()) : "No bundle")}. Falling back to cloning vanilla Hammer.");
-                // Fallback to cloning vanilla Hammer
-                GameObject vanillaHammer = ObjectDB.instance.GetItemPrefab("Hammer");
-                if (vanillaHammer == null)
-                {
-                    Debug.LogError($"{PluginName}: Vanilla Hammer prefab not found.");
-                    return;
-                }
-                tauntHammer = Instantiate(vanillaHammer);
-                tauntHammer.name = "TauntHammer_vad";
-                usedPath = "Vanilla Hammer (cloned)";
-            }
-            if (configVerboseLogging.Value)
-                Debug.Log($"{PluginName}: Successfully loaded TauntHammer_vad prefab from {usedPath}.");
-
-            // Get ItemDrop component
-            ItemDrop itemDrop = tauntHammer.GetComponent<ItemDrop>();
-            if (itemDrop == null)
-            {
-                Debug.LogError($"{PluginName}: ItemDrop component missing on TauntHammer_vad.");
-                return;
-            }
-
-            // Customize shared data
-            ItemDrop.ItemData.SharedData shared = itemDrop.m_itemData.m_shared;
-            shared.m_name = "Taunt Hammer"; // Plain text; assumes prefab has proper icon
-            shared.m_description = "A hammer that taunts enemies on hit.";
-            shared.m_maxQuality = 4; // Example
-
-            // Assign Taunt effect to attack
-            TauntEffect tauntEffect = StatusEffectManager.GetEffect("Taunted") as TauntEffect;
-            if (tauntEffect == null)
-            {
-                Debug.LogError($"{PluginName}: Taunted effect not found for TauntHammer_vad.");
-                return;
-            }
-            shared.m_attackStatusEffect = tauntEffect;
-            shared.m_attackStatusEffectChance = 1f; // 100% chance
-            if (configVerboseLogging.Value)
-                Debug.Log($"{PluginName}: Assigned Taunt effect to TauntHammer_vad (effect: {tauntEffect.name}, duration: {tauntEffect.Duration}s).");
-
-            // Add to ObjectDB
-            ObjectDB.instance.m_items.Add(tauntHammer);
-            if (configVerboseLogging.Value)
-                Debug.Log($"{PluginName}: Added TauntHammer_vad to ObjectDB. Effects in ObjectDB: {ObjectDB.instance.m_StatusEffects.Count}, Taunted present: {ObjectDB.instance.m_StatusEffects.Any(se => se.name == "Taunted")}.");
-
-            // Create and add recipe
-            Recipe recipe = ScriptableObject.CreateInstance<Recipe>();
-            recipe.name = "Recipe_TauntHammer_vad";
-            recipe.m_item = itemDrop;
-            recipe.m_amount = 1;
-            recipe.m_enabled = true;
-
-            // Set crafting station (Workbench)
-            GameObject stationPrefab = ZNetScene.instance?.GetPrefab("piece_workbench");
-            if (stationPrefab != null)
-            {
-                recipe.m_craftingStation = stationPrefab.GetComponent<CraftingStation>();
-                recipe.m_minStationLevel = 1;
-            }
-
-            // Parse recipe requirements
-            recipe.m_resources = ParseRequirements(configTauntHammerRecipe.Value, "TauntHammer_vad");
-            ObjectDB.instance.m_recipes.Add(recipe);
-
-            // Add to player's known recipes
-            if (Player.m_localPlayer != null)
-            {
-                var knownRecipes = (HashSet<string>)knownRecipesField?.GetValue(Player.m_localPlayer);
-                if (knownRecipes != null && !knownRecipes.Contains(recipe.name))
-                {
-                    knownRecipes.Add(recipe.name);
-                    if (configVerboseLogging.Value)
-                        Debug.Log($"{PluginName}: Added Recipe_TauntHammer_vad to player's known recipes.");
-                }
-            }
-
-            if (configVerboseLogging.Value)
-                Debug.Log($"{PluginName}: Added TauntHammer_vad with Taunt effect and recipe.");
-        }
-
-        private Piece.Requirement[] ParseRequirements(string configValue, string key)
-        {
-            if (itemRecipeCache.TryGetValue(key, out var cachedReqs))
-                return cachedReqs;
-
-            if (configVerboseLogging.Value)
-                Debug.Log($"{PluginName}: Parsing recipe for {key} - Config: {configValue}, ObjectDB items: {ObjectDB.instance?.m_items.Count ?? 0}, ZNetScene: {(ZNetScene.instance != null ? "Valid" : "Null")}");
-
-            var materialStrings = configValue.Split(',');
-            var reqs = new List<Piece.Requirement>();
-            if (!IsObjectDBValid() || ZNetScene.instance == null)
-            {
-                if (configVerboseLogging.Value)
-                    Debug.LogWarning($"{PluginName}: ObjectDB or ZNetScene not valid, using empty requirements for {key}.");
-                itemRecipeCache[key] = reqs.ToArray();
-                return reqs.ToArray();
-            }
-
-            for (int i = 0; i < materialStrings.Length; i += 3)
-            {
-                if (i + 2 >= materialStrings.Length) break;
-                string matName = materialStrings[i].Trim();
-                if (!int.TryParse(materialStrings[i + 1].Trim(), out int baseAmount))
-                    baseAmount = 1;
-                if (!int.TryParse(materialStrings[i + 2].Trim(), out int upgradeAmount))
-                    upgradeAmount = 0;
-                var resItem = ObjectDB.instance.GetItemPrefab(matName)?.GetComponent<ItemDrop>();
-                if (resItem == null)
-                {
-                    if (configVerboseLogging.Value)
-                        Debug.LogWarning($"{PluginName}: Invalid material '{matName}' in recipe for {key} - skipping.");
-                    continue;
-                }
-                reqs.Add(new Piece.Requirement
-                {
-                    m_resItem = resItem,
-                    m_amount = baseAmount,
-                    m_amountPerLevel = upgradeAmount,
-                    m_recover = true
-                });
-            }
-
-            var reqsArray = reqs.ToArray();
-            itemRecipeCache[key] = reqsArray;
-            if (configVerboseLogging.Value && reqsArray.Length == 0)
-                Debug.LogWarning($"{PluginName}: No valid requirements parsed for {key} - recipe may fail.");
-            return reqsArray;
-        }
-
         private void RegisterConsoleCommands()
         {
             new Terminal.ConsoleCommand("va_status_reload", "Reload RPGStatusEffects configs", (args) =>
             {
                 if (isShuttingDown) return;
                 Config.Reload();
-                itemRecipeCache.Clear();
+                RecipeManager.ClearCache();
                 ValidateConfigs();
                 if (IsObjectDBValid())
                 {
                     SetupStatusEffects();
-                    AddTauntHammer();
-                    Debug.Log($"{PluginName}: Configs reloaded and status effects/item updated.");
+                    RecipeManager.SetupRecipe();
+                    if (configVerboseLogging.Value)
+                        Debug.Log($"{PluginName}: Configs reloaded and status effects/recipe updated.");
                 }
                 else
                 {
-                    Debug.LogWarning($"{PluginName}: Cannot reload configs, ObjectDB not valid.");
+                    if (configVerboseLogging.Value)
+                        Debug.LogWarning($"{PluginName}: Cannot reload configs, ObjectDB not valid.");
                 }
             });
         }
@@ -390,31 +310,46 @@ namespace RPGStatusEffects
             return ObjectDB.instance != null;
         }
 
-        [HarmonyPatch(typeof(ObjectDB), "CopyOtherDB")]
-        public static class ObjectDB_CopyOtherDB_Patch
+        [HarmonyPatch(typeof(ObjectDB), "Awake")]
+        public static class ObjectDB_Awake_Path
         {
-            [HarmonyPostfix]
             public static void Postfix()
             {
                 if (!IsObjectDBValid()) return;
-                Instance.ValidateConfigs();
+                AddItems(itemPrefabs);
                 Instance.SetupStatusEffects();
-                Instance.AddTauntHammer();
-                Instance.isInitialized = true;
+                RecipeManager.SetupRecipe();
             }
         }
 
-        [HarmonyPatch(typeof(ObjectDB), "Awake")]
-        public static class ObjectDB_Awake_Patch
+        [HarmonyPatch(typeof(ObjectDB), "CopyOtherDB")]
+        public static class Object_CopyOtherDB_Path
         {
-            [HarmonyPostfix]
             public static void Postfix()
             {
-                if (!IsObjectDBValid()) return;
-                Instance.ValidateConfigs();
+                if (!IsObjectDBValid())
+                {
+                    if (Instance.configVerboseLogging.Value)
+                        Debug.LogWarning($"{PluginName}: ObjectDB not valid in CopyOtherDB, skipping item addition.");
+                    return;
+                }
+                AddItems(itemPrefabs);
                 Instance.SetupStatusEffects();
-                Instance.AddTauntHammer();
-                Instance.isInitialized = true;
+            }
+        }
+
+        [HarmonyPatch(typeof(ZNetScene), "Awake")]
+        public static class ZNetScene_Awake_Path
+        {
+            public static void Prefix(ZNetScene __instance)
+            {
+                if (__instance == null)
+                {
+                    if (Instance.configVerboseLogging.Value)
+                        Debug.LogWarning($"{PluginName}: No ZNetScene found");
+                    return;
+                }
+                AddPrefabsToZNetScene(__instance);
             }
         }
 
@@ -422,7 +357,6 @@ namespace RPGStatusEffects
         public static class TauntAIUpdatePatch
         {
             private static readonly MethodInfo setAlertedMethod = typeof(MonsterAI).GetMethod("SetAlerted", BindingFlags.NonPublic | BindingFlags.Instance);
-
             public static void Postfix(MonsterAI __instance, float dt)
             {
                 if (__instance == null) return;
@@ -436,12 +370,9 @@ namespace RPGStatusEffects
                 {
                     var targetField = typeof(MonsterAI).GetField("m_targetCreature", BindingFlags.NonPublic | BindingFlags.Instance);
                     targetField?.SetValue(__instance, taunt.Taunter);
-
-                    // Handle flee suppression and aggression
                     var fleeField = typeof(MonsterAI).GetField("m_fleeIfHurtWhenTargetCantBeReached", BindingFlags.NonPublic | BindingFlags.Instance);
                     var lowHealthFleeField = typeof(MonsterAI).GetField("m_fleeIfLowHealth", BindingFlags.NonPublic | BindingFlags.Instance);
                     var huntPlayerField = typeof(MonsterAI).GetField("m_enableHuntPlayer", BindingFlags.NonPublic | BindingFlags.Instance);
-
                     if (!originalHuntStates.ContainsKey(character))
                     {
                         bool originalFlee = fleeField != null ? (bool)fleeField.GetValue(__instance) : false;
@@ -463,16 +394,14 @@ namespace RPGStatusEffects
                         }
                         lastTauntLogTimes[character] = taunt.m_ttl;
                     }
-
-                    // Apply state changes every frame to ensure continuous suppression
                     if (fleeField != null)
-                        fleeField.SetValue(__instance, false); // Disable fleeing when hurt
+                        fleeField.SetValue(__instance, false);
                     if (lowHealthFleeField != null)
-                        lowHealthFleeField.SetValue(__instance, 0f); // Disable fleeing at low health
+                        lowHealthFleeField.SetValue(__instance, 0f);
                     if (huntPlayerField != null)
-                        huntPlayerField.SetValue(__instance, true); // Force aggressive pursuit
+                        huntPlayerField.SetValue(__instance, true);
                     if (setAlertedMethod != null)
-                        setAlertedMethod.Invoke(__instance, new object[] { true }); // Force alerted state
+                        setAlertedMethod.Invoke(__instance, new object[] { true });
                 }
                 else if (lastTauntLogTimes.Remove(character))
                 {
@@ -481,7 +410,6 @@ namespace RPGStatusEffects
                         var fleeField = typeof(MonsterAI).GetField("m_fleeIfHurtWhenTargetCantBeReached", BindingFlags.NonPublic | BindingFlags.Instance);
                         var lowHealthFleeField = typeof(MonsterAI).GetField("m_fleeIfLowHealth", BindingFlags.NonPublic | BindingFlags.Instance);
                         var huntPlayerField = typeof(MonsterAI).GetField("m_enableHuntPlayer", BindingFlags.NonPublic | BindingFlags.Instance);
-
                         if (fleeField != null)
                         {
                             fleeField.SetValue(__instance, originalStates.fleeIfHurt);
@@ -490,7 +418,7 @@ namespace RPGStatusEffects
                         }
                         if (lowHealthFleeField != null)
                         {
-                            lowHealthFleeField.SetValue(__instance, originalStates.fleeIfLowHealth ? 0.2f : 0f); // Restore to a reasonable default if true
+                            lowHealthFleeField.SetValue(__instance, originalStates.fleeIfLowHealth ? 0.2f : 0f);
                             if (Instance.configVerboseLogging.Value)
                                 Debug.Log($"{PluginName}: Restored fleeIfLowHealth={(originalStates.fleeIfLowHealth ? 0.2f : 0f)} for {character.name}.");
                         }
@@ -528,14 +456,13 @@ namespace RPGStatusEffects
                     taunt.Taunter = attackerChar;
                     if (Instance.configVerboseLogging.Value)
                         Debug.Log($"{PluginName}: Applied taunt from player to {__instance.name}.");
-                    // Apply Taunting effect to the attacker if it's a player
                     if (attackerChar.IsPlayer())
                     {
                         var playerSeman = attackerChar.GetSEMan();
                         var taunting = StatusEffectManager.GetEffect("Taunting") as TauntingEffect;
                         if (taunting != null)
                         {
-                            taunting.Duration = taunt.Duration; // Mirror duration
+                            taunting.Duration = taunt.Duration;
                             playerSeman.AddStatusEffect(taunting, true);
                             if (Instance.configVerboseLogging.Value)
                                 Debug.Log($"{PluginName}: Applied Taunting effect to player {attackerChar.name} for {taunting.Duration}s.");

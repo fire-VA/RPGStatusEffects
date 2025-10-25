@@ -5,7 +5,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
-using System.Reflection;
 using UnityEngine;
 
 namespace RPGStatusEffects
@@ -85,7 +84,7 @@ namespace RPGStatusEffects
             {
                 ConfigSync.lockExempt = isAdmin;
                 RPGStatusEffects.Instance?.SetupStatusEffects();
-                RPGStatusEffects.Instance?.AddTauntHammer(); // Line 88: Now accessible since AddTauntHammer is public
+                RecipeManager.SetupRecipe();
             }
         }
 
