@@ -18,7 +18,7 @@ namespace RPGStatusEffects
         private readonly Harmony harmony = new Harmony(PluginGUID);
         public const string PluginGUID = "com.Fire.rpgstatuseffects";
         public const string PluginName = "RPGStatusEffects";
-        public const string PluginVersion = "1.0.1";
+        public const string PluginVersion = "1.0.2";
         public ConfigSync configSync;
         public SyncedConfigEntry<bool> configVerboseLogging;
         public SyncedConfigEntry<float> configPurityDuration;
